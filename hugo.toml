@@ -1,0 +1,14 @@
+baseURL = 'https://blog.samsantana.com/'
+locale = 'en-us'
+title = "Sam Santana's Blog"
+theme = "PaperMod"
+
+[params]
+  env = 'production'
+  ShowReadingTime = 'true'
+  ShowShareButtons = 'true'
+  ShowPostNavLinks = 'true'
+
+  [params.homeInfoParams]
+    Title = "Sam Santana"
+    Content = "Writing about Kubernetes, Linux, and Homelabs"
