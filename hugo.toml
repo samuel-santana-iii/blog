@@ -20,3 +20,8 @@ theme = "PaperMod"
   [[params.socialIcons]]
     name = "linkedin"
     url = "https://www.linkedin.com/in/samuel-santana-iii"
+
+[[menu.main]]
+  name = "Portfolio"
+  url = "https://samsantana.com"
+  weight = 10
