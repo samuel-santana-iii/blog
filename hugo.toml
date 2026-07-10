@@ -12,3 +12,16 @@ theme = "PaperMod"
   [params.homeInfoParams]
     Title = "Sam Santana"
     Content = "Writing about Kubernetes, Linux, and Homelabs"
+
+  [[params.socialIcons]]
+    name = "github"
+    url = "https://github.com/samuel-santana-iii"
+
+  [[params.socialIcons]]
+    name = "linkedin"
+    url = "https://www.linkedin.com/in/samuel-santana-iii"
+
+[[menu.main]]
+  name = "Portfolio"
+  url = "https://samsantana.com"
+  weight = 10
