@@ -15,7 +15,7 @@ This post walks through exactly how that works: Hugo on GitHub Pages, wired up w
 
 The flow is simple and fully automated once set up:
 
-```
+```text
 Write post
   → git push to main
   → GitHub Action triggers
