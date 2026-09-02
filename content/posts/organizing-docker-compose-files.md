@@ -1,7 +1,7 @@
 ---
 title: "Organizing Docker Compose Files for a Homelab"
 date: 2026-09-01
-draft: true
+draft: false
 description: "A directory structure for Docker Compose that separates app data from configuration, shares environment variables across services, tracks the whole setup in git, and handles version updates without breaking things."
 tags: ["docker", "docker-compose", "self-hosted", "homelab", "environment-variables", "git"]
 ShowToc: true
