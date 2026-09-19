@@ -11,7 +11,7 @@ Getting your compose files into git solves the worst problem: you stop guessing 
 
 Deploying is still manual. You SSH into the server, `git pull`, and run something like `./dc.sh jellyfin up -d`. Which means the repository is the source of truth in theory, while the server is the source of truth in practice. The two agree right up until the evening you fix something directly on the box because it's 11pm and you just want the thing working. That edit never makes it back into git. A month later the repo describes a setup that no longer exists, and you find out when you try to rebuild.
 
-GitOps closes that loop by inverting the direction. Instead of you pushing changes to the server, an agent on the server pulls them from git. The repository stops being a record of what you meant to deploy and becomes the thing that is actually deployed. Editing a compose file on the server no longer works, because the next reconcile overwrites it — which sounds like a restriction until you realize it's the entire point.
+GitOps closes that loop by inverting the direction. Instead of you pushing changes to the server, an agent on the server pulls them from git. The repository stops being a record of what you meant to deploy and becomes the thing that is actually deployed. There's no longer a copy of the compose files on the server to hand-edit in the first place — the only copy is a clone the agent manages and resets on every pull, which sounds like a restriction until you realize it's the entire point.
 
 This post walks through that setup on my homelab: [doco-cd](https://github.com/kimdre/doco-cd) watching a git repository of Docker Compose stacks, with secrets encrypted in the repo via sops and image updates gated through Renovate. It picks up where [organizing Docker Compose files for a homelab]({{< ref "organizing-docker-compose-files.md" >}}) left off, and cashes the check that post wrote when it mentioned sops as "outside the scope."
 
@@ -76,7 +76,7 @@ Each mount is doing something specific:
 
 **`/var/run/docker.sock`** is the mechanism. doco-cd doesn't shell out to a `docker` binary or talk to a remote API — it drives the host's Docker daemon directly through its socket. That's also the security caveat, and it's worth stating plainly: a container with the Docker socket mounted can start any container it likes with any privileges it likes, which is effectively root on the host. I accept that here because doco-cd's whole job is managing containers on this machine and there's no way for it to do that job with less access. It's a deliberate trade, not an oversight, and it's the reason this container should be something you actually trust.
 
-**`/data`** is where doco-cd clones the repositories it watches. It's a bind mount rather than a named volume so the clone survives container recreation, which matters more than it looks like it does.
+**`/data`** is where doco-cd clones the repositories it watches. I use a bind mount rather than a named volume so the clone is visible on the host — handy for looking at what doco-cd actually checked out when a deploy does something surprising, and it lands in the same backup as the rest of `/mnt/user/appdata`.
 
 **`/etc/doco-cd/id_ed25519`** is the SSH deploy key, mounted read-only. This is why the repository URL in the poll config is the SSH form (`git@github.com:...`) rather than HTTPS — there's no token involved, just a key the server holds.
 
@@ -108,16 +108,16 @@ working_dir: apps/uptime-kuma
 compose_files:
   - docker-compose.yml
 env_files:
-  - .env
   - ../../shared.env
+  - .env
 ---
 name: jellyfin
 working_dir: apps/jellyfin
 compose_files:
   - docker-compose.yml
 env_files:
-  - .env
   - ../../shared.env
+  - .env
 ```
 
 `working_dir` is relative to the repo root, and the paths in `env_files` are relative to `working_dir` — which is why `shared.env` at the root is reached as `../../shared.env`. Order matters there for the same reason it mattered when running Compose by hand: later files win, so `shared.env` goes first and the app's own `.env` can override a shared value when it needs to.
@@ -138,8 +138,8 @@ doco-cd lets you define deployments inline in `poll.yaml`, under a `deployments:
       compose_files:
         - docker-compose.yml
       env_files:
-        - .env
         - ../../shared.env
+        - .env
     - name: jellyfin
       working_dir: apps/jellyfin
       # ...and so on for every stack
@@ -315,7 +315,9 @@ Adding a service to my homelab is now:
 
 It's running within 60 seconds. Nothing to SSH into, nothing to restart, no wrapper script to remember the flags for.
 
-The bigger change is that the drift is gone. The server can't disagree with the repository anymore, because the repository is what put it there. `git log` is the deployment history. `git revert` is the rollback. A "quick fix" applied directly on the box gets reverted within a minute, which is annoying exactly once and then teaches you to make the change in git instead.
+The bigger change is that most of the drift is gone. The repository is what put the containers there, `git log` is the deployment history, and `git revert` is the rollback.
+
+It's worth being precise about how much drift that actually covers, because "GitOps means the server can't disagree with git" is an overstatement. On each poll doco-cd compares what's running against what the compose files say should be running, and redeploys when something is missing. Stop or delete a container by hand and it comes back within the minute. But that check is about whether services are *running*, not whether a running container's configuration still matches the file. Nothing continuously diffs a live container against the compose file it came from, so a hand-applied change to an already-running stack can sit there until the next commit touches it. Configuration drift is discouraged rather than impossible, and the honest version of the benefit is that the path of least resistance now runs through git.
 
 It isn't free, and the tradeoffs are worth naming. doco-cd manages every stack except itself, so there's one container I still update by hand. Polling means deploys take up to a minute. Mounting the Docker socket gives doco-cd root-equivalent access to the host, which is inherent to what it does but shouldn't be waved away. And the age key is a single secret whose loss means re-encrypting every `.env` in the repo, so it belongs in your backups before you need it.
 
