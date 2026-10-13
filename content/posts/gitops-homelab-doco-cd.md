@@ -38,17 +38,13 @@ This builds directly on the layout from the previous post, so it assumes:
 - The `apps/<name>/docker-compose.yml` plus root-level `shared.env` structure described [there]({{< ref "organizing-docker-compose-files.md" >}})
 - A git remote you can reach from the server over SSH
 
-My server runs Unraid, which shows up below in paths like `/mnt/user/appdata/`. Nothing here is Unraid-specific beyond those paths — swap them for wherever your host keeps persistent container data.
+My server runs Unraid, which shows up below in paths like `/mnt/user/appdata/`. Nothing here is Unraid-specific beyond those paths. Swap them for wherever your host keeps persistent container data.
 
 ## Why polling instead of webhooks
 
 doco-cd supports both. A webhook gives you near-instant deploys: GitHub sends a request the moment you push, and the stack updates seconds later. Polling means doco-cd checks the repository on an interval and picks up changes on the next pass.
 
-Webhooks need doco-cd to be reachable from the internet. That means an inbound port forwarded through the router to a service that accepts requests from outside my network. For a homelab, that's a new piece of exposed attack surface to keep patched and think about, in exchange for saving under a minute.
-
-Polling only makes outbound connections. Nothing needs to be reachable, no port gets forwarded, and the router configuration doesn't change at all. The cost is latency: with a 60-second interval, a push takes up to a minute to land.
-
-For a homelab that's an easy trade. I'm not shipping to production on a deadline; I'm adding a media server on a Saturday. Sixty seconds of waiting costs nothing, and not exposing an endpoint to the internet is worth real money in attention I don't have to spend. If you're running this somewhere the latency matters, the calculus changes — but be honest about whether it actually matters before you open the port.
+Both work, but I went with polling simply so I don't have to open an addtional port in my router's firewall. If I ever change networks or routers, thats one less port I have to remember to port forward.
 
 ## Running doco-cd itself
 
@@ -74,11 +70,11 @@ services:
 
 Each mount is doing something specific:
 
-**`/var/run/docker.sock`** is the mechanism. doco-cd doesn't shell out to a `docker` binary or talk to a remote API — it drives the host's Docker daemon directly through its socket. That's also the security caveat, and it's worth stating plainly: a container with the Docker socket mounted can start any container it likes with any privileges it likes, which is effectively root on the host. I accept that here because doco-cd's whole job is managing containers on this machine and there's no way for it to do that job with less access. It's a deliberate trade, not an oversight, and it's the reason this container should be something you actually trust.
+**`/var/run/docker.sock`** is the socket doco-cd needs to connect to docker. doco-cd drives the host's Docker daemon directly through its socket. This socket is how doco-cd is able to view, remove and create docker containers.
 
-**`/data`** is where doco-cd clones the repositories it watches. I use a bind mount rather than a named volume so the clone is visible on the host — handy for looking at what doco-cd actually checked out when a deploy does something surprising, and it lands in the same backup as the rest of `/mnt/user/appdata`.
+**`/data`** is where doco-cd clones the repositories it watches. I use a bind mount rather than a named volume so the clone is visible on the host. This is handy for looking at what doco-cd actually checked out when a deploy does something surprising, and it lands in the same backup as the rest of `/mnt/user/appdata`.
 
-**`/etc/doco-cd/id_ed25519`** is the SSH deploy key, mounted read-only. This is why the repository URL in the poll config is the SSH form (`git@github.com:...`) rather than HTTPS — there's no token involved, just a key the server holds.
+**`/etc/doco-cd/id_ed25519`** is the SSH deploy key, mounted read-only. This is why the repository URL in the poll config is the SSH form (`git@github.com:...`) rather than HTTPS.
 
 **`/keys/keys.txt`** is the age private key that decrypts the sops-encrypted `.env` files. More on that below.
 
@@ -86,13 +82,11 @@ The port mapping (`8088:80`) exposes doco-cd's webhook listener. Since I'm polli
 
 I start it with `docker compose up -d`, and updating it means pulling a new image and recreating it by hand. Unraid restores container run-state across reboots — anything running at shutdown comes back at boot — so in practice it survives restarts without intervention.
 
-One honest inconsistency: doco-cd is pinned to `:latest` while every stack it manages is pinned to a specific version and gated behind Renovate. That's backwards, given it's the most privileged container on the box. It's on my list.
-
 ## Two config files, two lifecycles
 
 doco-cd reads two different config files, and the difference between them is the single most important thing to understand about running it.
 
-`poll.yaml` tells doco-cd *what to watch*. In this repo it's three lines:
+`poll.yaml` tells doco-cd *what to watch*. This only is read at startup, so changing this requires a restart of doco-cd. In this repo it's three lines:
 
 ```yaml
 - url: git@github.com:samuel-santana-iii/homelab-gitops.git
@@ -120,9 +114,9 @@ env_files:
   - .env
 ```
 
-`working_dir` is relative to the repo root, and the paths in `env_files` are relative to `working_dir` — which is why `shared.env` at the root is reached as `../../shared.env`. Order matters there for the same reason it mattered when running Compose by hand: later files win, so `shared.env` goes first and the app's own `.env` can override a shared value when it needs to.
+`working_dir` is relative to the repo root, and the paths in `env_files` are relative to `working_dir`. This is why `shared.env` at the root is reached as `../../shared.env`. Order matters there for the same reason it mattered when running Compose by hand: later files can override pre-existing variables, so `shared.env` goes first before the app's own `.env`.
 
-That split isn't how I set it up originally, and the reason it changed is worth explaining.
+That split isn't how I set it up originally. I originally had my deployments in my `poll.yaml`, and the reason it changed is worth explaining.
 
 ### Why the deployments moved
 
@@ -145,21 +139,21 @@ doco-cd lets you define deployments inline in `poll.yaml`, under a `deployments:
       # ...and so on for every stack
 ```
 
-It worked, but every time I added a stack I had to restart the doco-cd container before it would deploy. The deployment was automated; *registering* a deployment wasn't. For a setup whose entire premise is "push to git and walk away," needing to SSH in and restart a container to add a service defeats the point.
+It worked, but every time I added a stack I had to restart the doco-cd container before it would deploy. The deployment was automated. *Registering* a deployment wasn't. For a setup whose entire premise is "push to git and watch the changes apply," needing to SSH in and restart a container to add a service defeats the point.
 
 The cause is that `poll.yaml` is startup configuration. doco-cd reads it once when the process boots and never looks at it again. There's no file watcher on it and no reload signal. Anything defined in `poll.yaml` is frozen until the container restarts.
 
-`.doco-cd.yml` is different. It lives in the repository, so doco-cd re-reads it out of a fresh clone on every poll. A new document in that file is picked up on the next cycle like any other change.
+`.doco-cd.yml` is different. It lives in the repository, so doco-cd re-reads it out of a fresh clone on every poll. A new modification in that file is picked up on the next poll cycle like any other change.
 
 So the fix was to move every deployment out of `poll.yaml` and into `.doco-cd.yml`, leaving `poll.yaml` with only the three lines above. Adding a stack is now a commit and a push, live within 60 seconds, with nothing to restart.
 
-> **A warning if you go looking for more.** It's tempting to point `POLL_CONFIG_FILE` at a copy of `poll.yaml` inside the repository, on the theory that doco-cd will then pick up poll config changes from git too. It won't. The read-once behavior is a property of when the file is loaded at startup, not of where the file lives, so relocating it changes nothing — and pointing it inside doco-cd's own clone means a wiped data directory leaves it unable to start at all. Keep `poll.yaml` mounted in from outside the repo, and keep everything that should change without a restart in `.doco-cd.yml`.
+> **A warning if you go looking for more.** Ensure you point `POLL_CONFIG_FILE` to a file on on host machine instead of the git repo. That way you can easily change the github url if you ever change the repository url. I keep a copy in my repository, but that for source control so I know the file format.
 
 ## Secrets: encrypted in git with sops
 
-The previous post gitignored every `.env` file and committed `.env.sample` files in their place. That works, but it has a failure mode: the samples drift. Someone adds a variable to the real `.env`, forgets the sample, and six months later a rebuild fails on a variable nobody remembers.
+The previous post gitignored every `.env` file. This is done for security purposes, but if we ever need to restore from source control, all the environment variables will need to be manually set. 
 
-[sops](https://github.com/getsops/sops) removes the need for samples entirely by encrypting the real values and committing those. The file in git holds actual configuration, just unreadable without the key:
+[sops](https://github.com/getsops/sops) allows us to check in our secrets by encrypting the real values and committing those. The file in git holds actual configuration, just unreadable without the key:
 
 ```env
 TIMEZONE=ENC[AES256_GCM,data:n8Kq2Rm7Xp4vLzT0aWcBdQfEgg==,iv:h3Nb9PwXqVzR...]
@@ -183,40 +177,23 @@ sops apps/jellyfin/.env      # edit in place
 sops -d apps/jellyfin/.env   # decrypt to stdout
 ```
 
-Note that sops encrypts *values*, not keys. Variable names stay readable in the committed file, so `git diff` still shows you which variable changed even when it can't show you the new value. That's a useful property — you get a meaningful history without leaking anything.
+Note that sops encrypts *values*, not keys. Variable names stay readable in the committed file, so `git diff` still shows you which variable changed even when it can't show you the new value. That's a useful feature. You get a meaningful history without leaking anything.
 
 ### Getting the key onto the server
 
-There's exactly one step in this entire setup that can't be automated, and it's this one: the age private key has to reach the server out of band. I copied it with `scp`.
+I didn't cover creating a age key for sops, but it will need to be copied to your server. I copied they key with `scp`.
 
-That's not a gap in the tooling, it's unavoidable. The key is what decrypts the repository, so it obviously can't live *in* the repository. Every secrets-management scheme bottoms out in one credential that has to be delivered by some other means — you can push that credential into a cloud KMS or a vault, but then something has to authenticate to *that*, and you're holding a different key instead. At some point a human copies a secret to a machine. This setup has exactly one of those, which is about as good as it gets.
-
-Two environment variables point at that key, and the similar names make them easy to confuse:
+The key is what decrypts the repository, so it can't live *in* the repository. Once copied doco-cd needs to know where to find it. One environment variable point at that key:
 
 ```env
 DOCO_SOPS_AGE_KEY_FILE=/mnt/user/appdata/doco-cd/keys/keys.txt
-SOPS_AGE_KEY_FILE=/keys/keys.txt
 ```
-
-`DOCO_SOPS_AGE_KEY_FILE` is a **host** path. It's consumed by the compose file as the source of the bind mount (`${DOCO_SOPS_AGE_KEY_FILE}:/keys/keys.txt:ro`). `SOPS_AGE_KEY_FILE` is the **container** path — it's what sops itself reads once it's running inside doco-cd. They describe the two ends of the same mount, and getting them backwards produces a decryption failure that doesn't obviously point at either one.
-
-### The file that stays in plaintext
-
-One `.env` in the repo is deliberately unencrypted, with a comment saying so:
-
-```env
-# Plaintext on purpose: Renovate needs to read this value directly to
-# open/gate version-bump PRs. Do not run `sops -e` on this file.
-IMMICH_VERSION=v3
-```
-
-Renovate parses files in the repository to find version strings it can update. It has no access to the age key and no way to decrypt anything, so a version pinned inside an encrypted file is invisible to it. Splitting the version out into its own plaintext `version.env` keeps it visible to Renovate while the actual secrets for that stack stay encrypted next to it. The comment exists because this looks exactly like a mistake, and future me needed to know it wasn't.
 
 ## Removing a stack
 
-Adding a stack is a commit. Removing one is not symmetrical, and this surprised me enough to be worth flagging.
+Adding a stack is a commit. Removing one is not as straightforward.
 
-Deleting a stack's document from `.doco-cd.yml` doesn't tear anything down. doco-cd stops managing the stack, but the containers keep running. That's intentional: a reconciler that destroys containers and volumes whenever an entry disappears from a config file is one bad merge away from deleting data you wanted.
+Deleting a stack's entry from `.doco-cd.yml` doesn't tear anything down. doco-cd stops managing the stack, but the containers keep running. That's intentional. This ensures a accidental remove does not delete data or stop your container.
 
 Teardown has to be requested explicitly, then cleaned up, in two commits. First, mark the stack for destruction in `.doco-cd.yml`:
 
@@ -232,13 +209,11 @@ compose_files:
 
 On the next poll, doco-cd stops and removes that stack's containers, volumes, and images. Once that's confirmed, a second commit deletes the document and the `apps/tailscale/` directory.
 
-`remove_dir: false` is the part to get right. The default is `true`, which deletes the deployment's directory after teardown — but every deployment in this repo shares one checkout under `/data`. "The deployment's directory" is the whole clone, not just that app's folder, so the default would take every other stack's configuration with it. If you're running one deployment per repository, the default is fine. If you're running a monorepo of stacks like this one, it isn't.
-
-I haven't had to run this yet — the one stack I've removed predates the current layout, and I deleted it the blunt way. But it's the kind of thing worth understanding before you need it rather than during.
-
 ## Keeping images current with Renovate
 
-Automatic deploys make stale images worse, not better. If pushing to git deploys instantly, an unpinned `:latest` tag means a maintainer's release can land on your server at any hour with no involvement from you. Everything here is pinned, and updates arrive as pull requests.
+Automatic updates for a container can eventually take down your service. An unpinned `:latest` tag means a new image release can deploy on your server at any hour. Its a convenient feautre until a version with breaking changes deploys. 
+
+Every image version here is pinned, and Renovate applies updates as pull requests. Version updates become something you manually approve. You can see if a major version is pending.
 
 `renovate.json` is scoped to Docker Compose files and runs weekly:
 
@@ -249,8 +224,6 @@ Automatic deploys make stale images worse, not better. If pushing to git deploys
   "schedule": ["before 4am on Monday"]
 }
 ```
-
-Nothing automerges. That's the same reasoning as the major-version bump in the previous post: a version change is a decision to accept a possible breaking change, and a pull request is where that decision gets made and recorded. The difference is that Renovate now finds the updates instead of me noticing them eventually.
 
 Related images are grouped so one PR covers a whole stack rather than five arriving separately:
 
