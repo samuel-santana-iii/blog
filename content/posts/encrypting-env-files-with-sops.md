@@ -1,7 +1,7 @@
 ---
 title: "Encrypting .env Files for Version Control with sops and age"
 date: 2026-10-13
-draft: true
+draft: false
 description: "Committing real secret values to git with sops and age: what each tool does, generating and backing up a key, encryption rules, a file naming scheme that fails safe, and using encrypted .env files with Docker Compose."
 tags: ["sops", "age", "secrets", "docker-compose", "homelab", "git", "environment-variables"]
 ShowToc: true
